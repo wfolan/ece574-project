@@ -4,51 +4,46 @@
 #include "gpio.h"
 #include "util.h"
 
-#define FIXED_PI2  0xC90F
-#define ANGLE_STEP (FIXED_PI2 / 16)
-#define BASE_ADDR  0x20001020
+#define KV_BASE_ADDR  0x20001020 //Added KV_
+volatile int *kv = (int *) KV_BASE_ADDR; //Ensure this connection works cordic > kv
 
-volatile int *cordic = (int *) BASE_ADDR;
+//EDIT THESE BASED ON WHAT ACTUALLY NEEDS TO BE DONE
+#define REG_CTRL       0   // start, mode, clamp, int_en
+#define REG_LEN        1   // number of INT16 elements
+#define REG_SRC_ADDR   2   // byte address
+#define REG_DST_ADDR   3   // byte address
+#define REG_SCALE      4   // optional: preset scale
+#define REG_ZP         5   // optional: preset zero-point
+#define REG_STATUS     6   // busy, done, err
 
 int main(void) {
   uart_init();
   uint32_t start, end;
-  int angle = 0;
-  int sine;
-  int i;
 
-  // Start timer and write initial angle
+  // Start timer -- should this go below ?
   start = get_mcycle();
 
-  cordic[0] = angle;     // wr_input_angle
-  cordic[1] = 0x1;       // wr_control: start = 1
+  //configurate initials
+  kv[REG_LEN]         = ; 
+  kv[REG_SRC_ADDR]    = ;
+  kv[REG_DST_ADDR]    = ;
+
+  //add optionals?
+
+  //put start here?
+  kv[REG_CTRL]        = 0x1; //controls start (CTRL.start?)
 
   // Wait for completion
-  while ((cordic[2] & 0x1) == 0)
-    ; // Wait until done bit set
+  while ((kv[REG_STATUS] & 0x1) == 0)
+    ; // Wait until done
 
   // End timer
   end = get_mcycle();
 
   // Read result 
-  sine = cordic[3];
+  //output like sine = cordic[3];???
   printf("Cordic HW Cycles: %x\n", end - start);
   printf("HW %x -> %x\n", angle, sine);
-
-  // Sweep angles like the SW test 
-  angle = ANGLE_STEP;
-  for (i = 0; i < 4; i++) {
-    cordic[0] = angle;
-    cordic[1] = 0x1;  // start again
-
-    while ((cordic[2] & 0x1) == 0)
-      ;
-
-    sine = cordic[3];
-    printf("HW %x -> %x\n", angle, sine);
-
-    angle += ANGLE_STEP;
-  }
 
   uart_write_flush();
   return 1;
