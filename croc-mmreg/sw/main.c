@@ -1,45 +1,49 @@
 #include <stdint.h>
-#include <stdio.h>
+#include <stdbool.h>
+
+#include "lib/inc/uart.h"
+#include "lib/inc/timer.h"
+#include "lib/inc/print.h"
 #include "kvcompressor.h"
 
-// External cycle counter from Croc runtime
-extern uint32_t get_mcycle(void);
-
-// Example buffers (aligned in .data/.bss automatically)
-int16_t input_vec[512];
-int8_t  output_vec[512];
+// Example buffers
+static int16_t input_vec[512]; //input buffer
+static int8_t  output_vec[512]; //output buffer
 
 int main(void) {
-    // -------------------------------------------------------------
-    // Fill test vector
-    // -------------------------------------------------------------
+    uart_init();
+    print_str("KV Compressor Demo\n");
+
+    // Loop through and fill every element of the input vector
     for (int i = 0; i < 512; i++)
         input_vec[i] = (i - 256) * 2;
 
-    uint32_t src = (uint32_t) input_vec;
-    uint32_t dst = (uint32_t) output_vec;
+    uint32_t src = (uint32_t) input_vec; //addrss of input vector
+    uint32_t dst = (uint32_t) output_vec; //address of output vector
 
-    // -------------------------------------------------------------
-    // Run accelerator
-    // -------------------------------------------------------------
-    uint32_t start_cycle = get_mcycle();
+    // Run
+    uint32_t start = get_mcycle();
 
     kvcompressor_run_blocking(src, dst, 512,
-                              true,    // auto-scale
-                              0,       // scale ignored in auto mode
-                              0);      // zp ignored in auto mode
+                              true,    // auto-scale on
+                              0,       // scale ignored
+                              0);      // zp ignored
 
-    uint32_t end_cycle = get_mcycle();
+    uint32_t end = get_mcycle();
 
-    // -------------------------------------------------------------
     // Print performance + output data
-    // -------------------------------------------------------------
-    printf("KV compressor cycles: %u\n", end_cycle - start_cycle);
+    print_str("Cycles: ");
+    print_dec(end - start);
+    print_str("\n");
 
-    printf("First 16 output bytes:\n");
-    for (int i = 0; i < 16; i++)
-        printf("%d ", output_vec[i]);
-    printf("\n");
+    print_str("First 16 output bytes:\n");
+    for (int i = 0; i < 16; i++) {
+        print_hex(output_vec[i] & 0xFF);  // show signed 8-bit
+        print_str(" ");
+    }
+    print_str("\n");
 
-    while (1) ;  // halt
+    while (1) {;}
+
+    return 0;
 }

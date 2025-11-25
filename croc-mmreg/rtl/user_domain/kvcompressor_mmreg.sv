@@ -16,7 +16,7 @@ module kvcompressor_mmreg
     input  sbr_obi_req_t obi_req_i,
     output sbr_obi_rsp_t obi_rsp_o,
 
-    // Outputs to kvcompressor_core
+    // Signals feed to to kvcompressor_core
     output logic         start_o,
     output logic         auto_scale_o,
     output logic         int_en_o,
@@ -33,9 +33,7 @@ module kvcompressor_mmreg
     input  logic         irq_i
 );
 
-    // -------------------------------------------------------------------------
     // LOCAL REGISTER DEFINITIONS
-    // -------------------------------------------------------------------------
     localparam int RegWidth = 32;
 
     typedef enum int unsigned {
@@ -49,6 +47,7 @@ module kvcompressor_mmreg
         NUM_REGS      = 7
     } kvreg_e;
 
+    //storage structure for registers
     typedef struct packed {
         logic [RegWidth-1:0] reg [NUM_REGS];
     } kv_mmreg_reg_t;
@@ -56,9 +55,7 @@ module kvcompressor_mmreg
     // Register storage
     kv_mmreg_reg_t kv_regs_q, kv_regs_d;
 
-    // -------------------------------------------------------------------------
     // Instantiate generic MMREG logic
-    // -------------------------------------------------------------------------
     mmreg #(
         .obi_req_t (sbr_obi_req_t),
         .obi_rsp_t (sbr_obi_rsp_t)
@@ -73,9 +70,7 @@ module kvcompressor_mmreg
         .reg_d     (kv_regs_d)    // next-state
     );
 
-    // -------------------------------------------------------------------------
     // Output mappings to KV core
-    // -------------------------------------------------------------------------
     assign start_o      = kv_regs_q.reg[REG_CTRL][0];
     assign auto_scale_o = kv_regs_q.reg[REG_CTRL][1];
     assign int_en_o     = kv_regs_q.reg[REG_CTRL][2];
@@ -86,9 +81,7 @@ module kvcompressor_mmreg
     assign scale_o      = kv_regs_q.reg[REG_SCALE];
     assign zp_o         = kv_regs_q.reg[REG_ZP];
 
-    // -------------------------------------------------------------------------
     // STATUS (read-only)
-    // -------------------------------------------------------------------------
     always_comb begin
         kv_regs_d = kv_regs_q;
 
