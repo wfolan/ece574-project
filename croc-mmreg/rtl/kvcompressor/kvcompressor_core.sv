@@ -39,7 +39,9 @@ module kvcompressor_core #(
     input  logic         mem_err_i
 );
 
+    // -----------------------------
     // FSM State Declaration
+    // -----------------------------
     typedef enum logic [3:0] {
         IDLE        = 4'd0,
         LOAD_SCALE  = 4'd1,
@@ -54,32 +56,41 @@ module kvcompressor_core #(
 
     state_e state_q, state_d;
 
+    // -------------------------------------
     // Internal registers
+    // -------------------------------------
     logic [31:0] element_count_q, element_count_d;
 
-    // auto-scale accumulators (first pass)
-    logic signed [15:0] min_q, min_d;
-    logic signed [15:0] max_q, max_d;
-
-    // whether we are currently in the first pass for auto-scale
-    logic auto_scale_pass1_q, auto_scale_pass1_d;
+    // auto-scale accumulators
+    logic signed [15:0] min_q, max_q, min_d, max_d;
 
     // quantization parameters
-    logic [31:0] scale_q, scale_d;  // Q15 fixed-point scale
-    logic [31:0] zp_q, zp_d;        // zero-point (usually 0 for symmetric int8)
+    logic [31:0] scale_q, scale_d;
+    logic [31:0] zp_q, zp_d;
 
     // packer buffer (4 × int8 → one 32-bit word)
     logic [1:0]  packer_count_q, packer_count_d;
     logic [31:0] packer_q, packer_d;
 
-    // memory address offsets
+    // memory address offset
     logic [31:0] src_offset_q, src_offset_d;
     logic [31:0] dst_offset_q, dst_offset_d;
 
     // extracted samples
     logic signed [15:0] x0, x1;
 
+    // *** NEW: pre-decode mem_rdata_i outside always_comb ***
+    logic signed [15:0] x0_from_mem, x1_from_mem;
+    assign x0_from_mem = mem_rdata_i[15:0];
+    assign x1_from_mem = mem_rdata_i[31:16];
+
+    // *** NEW: pre-extract lower 16 bits of packer_q outside always_comb ***
+    logic [15:0] packer_low16;
+    assign packer_low16 = packer_q[15:0];
+
+    // -------------------------------------
     // Default outputs + FSM
+    // -------------------------------------
     always_comb begin
         // defaults
         mem_req_o   = 1'b0;
@@ -93,8 +104,8 @@ module kvcompressor_core #(
         irq_o  = 1'b0;
 
         // next-state defaults
-        state_d          = state_q;
-        element_count_d  = element_count_q;
+        state_d         = state_q;
+        element_count_d = element_count_q;
 
         src_offset_d = src_offset_q;
         dst_offset_d = dst_offset_q;
@@ -102,47 +113,47 @@ module kvcompressor_core #(
         min_d = min_q;
         max_d = max_q;
 
-        auto_scale_pass1_d = auto_scale_pass1_q;
-
         scale_d = scale_q;
         zp_d    = zp_q;
 
         packer_d       = packer_q;
         packer_count_d = packer_count_q;
 
-        // FSM Logic
-        unique case (state_q)
+        x0 = x0; // keep current by default
+        x1 = x1;
 
+        // -----------------------------
+        // FSM Logic
+        // -----------------------------
+        case (state_q)
+
+            // ============================================================
             // IDLE
+            // ============================================================
             IDLE: begin
                 if (start_i) begin
                     state_d = LOAD_SCALE;
 
-                    element_count_d = 32'd0;
-                    src_offset_d    = 32'd0;
-                    dst_offset_d    = 32'd0;
+                    // initialize remaining-element counter to total length
+                    element_count_d = length_i;
+                    src_offset_d    = 0;
+                    dst_offset_d    = 0;
 
-                    packer_d       = 32'd0;
-                    packer_count_d = 2'd0;
-
-                    // latch whether we will do auto-scale
-                    auto_scale_pass1_d = auto_scale_i;
+                    packer_d       = 0;
+                    packer_count_d = 0;
 
                     if (auto_scale_i) begin
-                        // initialize min/max for first pass
                         min_d = 16'sh7FFF;
                         max_d = -16'sh8000;
-                    end else begin
-                        min_d = 16'sd0;
-                        max_d = 16'sd0;
                     end
                 end
             end
 
+            // ============================================================
             // LOAD_SCALE
+            // ============================================================
             LOAD_SCALE: begin
                 if (!auto_scale_i) begin
-                    // manual mode: use programmed scale/zp
                     scale_d = scale_i;
                     zp_d    = zp_i;
                     state_d = READ_REQ;
@@ -152,7 +163,9 @@ module kvcompressor_core #(
                 end
             end
 
+            // ============================================================
             // READ_REQ
+            // ============================================================
             READ_REQ: begin
                 mem_req_o  = 1'b1;
                 mem_addr_o = src_addr_i + src_offset_q;
@@ -162,100 +175,76 @@ module kvcompressor_core #(
                     state_d = READ_WAIT;
             end
 
+            // ============================================================
             // READ_WAIT
+            // ============================================================
             READ_WAIT: begin
                 if (mem_rvalid_i) begin
-                    // extract INT16 samples
-                    x0 = mem_rdata_i[15:0];
-                    x1 = mem_rdata_i[31:16];
+                    // extract INT16 samples (no constant selects in always_comb)
+                    x0 = x0_from_mem;
+                    x1 = x1_from_mem;
 
-                    element_count_d = element_count_q + 32'd2;
-                    src_offset_d    = src_offset_q + 32'd4;
+                    // we treat element_count_q as "elements remaining"
+                    // we just consumed 2 more INT16 samples
+                    if (element_count_q > 32'd2)
+                        element_count_d = element_count_q - 32'd2;
+                    else
+                        element_count_d = 32'd0;
 
-                    if (auto_scale_pass1_q) begin
-                        // first pass: update min/max
-                        logic signed [15:0] tmp_min;
-                        logic signed [15:0] tmp_max;
+                    src_offset_d = src_offset_q + 32'd4;
 
-                        tmp_min = (x0 < min_q) ? x0 : min_q;
-                        tmp_min = (x1 < tmp_min) ? x1 : tmp_min;
+                    if (auto_scale_i) begin
+                        // update min/max
+                        min_d = (x0 < min_q) ? x0 : min_q;
+                        min_d = (x1 < min_d) ? x1 : min_d;
 
-                        tmp_max = (x0 > max_q) ? x0 : max_q;
-                        tmp_max = (x1 > tmp_max) ? x1 : tmp_max;
-
-                        min_d = tmp_min;
-                        max_d = tmp_max;
+                        max_d = (x0 > max_q) ? x0 : max_q;
+                        max_d = (x1 > max_d) ? x1 : max_d;
                     end
 
-                    // last element of this pass?
-                    if (element_count_d >= length_i) begin
-                        element_count_d = 32'd0;
-                        src_offset_d    = 32'd0;
-
-                        if (auto_scale_pass1_q) begin
-                            // end of first pass in auto-scale mode
+                    // last element?
+                    if (element_count_d == 0) begin
+                        if (auto_scale_i)
                             state_d = CALC_SCALE;
-                        end else begin
-                            // normal processing pass
+                        else
                             state_d = PROCESS;
-                        end
+
+                        // for a possible second pass in auto-scale mode,
+                        // restart src_offset at 0; element_count_d will be
+                        // reinitialized in CALC_SCALE or kept as 0 for PROCESS
+                        src_offset_d = 32'd0;
                     end else begin
-                        // continue streaming
                         state_d = READ_REQ;
                     end
                 end
             end
 
+            // ============================================================
             // CALC_SCALE
+            // ============================================================
             CALC_SCALE: begin
-                // Compute symmetric range based on min/max from pass 1
-                logic signed [15:0] abs_min;
-                logic signed [15:0] abs_max;
+                logic signed [15:0] absmax;
+                absmax = (max_q > -min_q) ? max_q : -min_q;
 
-                // |min_q|
-                abs_min = (min_q < 0) ? -min_q : min_q;
+                scale_d = 32'(127) / absmax;
+                zp_d    = 32'(128);
 
-                // abs_max = max(|min_q|, max_q)
-                abs_max = (max_q > abs_min) ? max_q : abs_min;
-
-                if (abs_max == 0) begin
-                    // Degenerate case: all zeros
-                    scale_d = 32'd0;
-                end else begin
-                    // Q15 fixed-point scale:
-                    // scale_real = 127 / abs_max
-                    // scale_q    = round(scale_real * 2^15)
-                    //           = (127 << 15) / abs_max
-                    scale_d = (32'(127) <<< 15) / abs_max;
-                end
-
-                // Symmetric signed int8 → zero point = 0
-                zp_d = 32'sd0;
-
-                // Finished first pass
-                auto_scale_pass1_d = 1'b0;
-
-                // Reset counters and offsets for second pass
-                element_count_d = 32'd0;
+                // reinitialize remaining-element counter for second pass
+                element_count_d = length_i;
                 src_offset_d    = 32'd0;
-                dst_offset_d    = 32'd0;
 
-                // Go back to READ_REQ for quantizing pass
                 state_d = READ_REQ;
             end
 
+            // ============================================================
             // PROCESS (INT16 → INT8 quant + pack)
+            // ============================================================
             PROCESS: begin
                 // perform quantization
                 logic signed [7:0] q0, q1;
 
-                // x * scale_q is Q(16+15) → shift back by 15
-                q0 = (x0 * $signed(scale_q)) >>> 15;
-                q1 = (x1 * $signed(scale_q)) >>> 15;
-
-                // apply zero-point (useful if non-zero ZP in manual mode)
-                q0 = q0 + $signed(zp_q[7:0]);
-                q1 = q1 + $signed(zp_q[7:0]);
+                q0 = ((x0 * scale_q) >>> 15) + zp_q;
+                q1 = ((x1 * scale_q) >>> 15) + zp_q;
 
                 // clamp to [-128, 127]
                 if (q0 > 127)  q0 = 127;
@@ -263,23 +252,27 @@ module kvcompressor_core #(
                 if (q1 > 127)  q1 = 127;
                 if (q1 < -128) q1 = -128;
 
-                // packer logic: shift existing bytes down and insert new ones at MSB side
-                packer_d = (packer_q >> 8);
-                packer_d[31:24] = q0;
-                packer_d[23:16] = q1;
-                packer_count_d  = packer_count_q + 2;
+                // ---------- packer logic WITHOUT bit selects in always_comb ----------
+                // lower 16 bits come from packer_low16 (assigned outside)
+                packer_d       = { q0, q1, packer_low16 };
+                packer_count_d = packer_count_q + 2;
 
-                element_count_d = element_count_q + 2;
+                // element_count_q now means "elements remaining"
+                // we do NOT modify it here; it is only updated in READ_WAIT
 
                 // need to write?
-                if (packer_count_d == 4 || element_count_d >= length_i) begin
+                // If we've packed 4 bytes OR there are no elements left,
+                // request a write.
+                if (packer_count_d == 4 || element_count_q == 0) begin
                     state_d = WRITE_REQ;
                 end else begin
                     state_d = READ_REQ;
                 end
             end
 
+            // ============================================================
             // WRITE_REQ
+            // ============================================================
             WRITE_REQ: begin
                 mem_req_o   = 1'b1;
                 mem_we_o    = 1'b1;
@@ -290,22 +283,26 @@ module kvcompressor_core #(
                     state_d = WRITE_WAIT;
             end
 
+            // ============================================================
             // WRITE_WAIT
+            // ============================================================
             WRITE_WAIT: begin
-                // simple "write accepted" model; tools may refine this
                 if (mem_rvalid_i || !mem_err_i) begin
-                    dst_offset_d    = dst_offset_q + 32'd4;
-                    packer_d        = 32'd0;
-                    packer_count_d  = 2'd0;
+                    dst_offset_d    = dst_offset_q + 4;
+                    packer_d        = 0;
+                    packer_count_d  = 0;
 
-                    if (element_count_q >= length_i)
+                    // If no elements remain, we are done; otherwise, keep reading.
+                    if (element_count_q == 0)
                         state_d = FINISH;
                     else
                         state_d = READ_REQ;
                 end
             end
 
+            // ============================================================
             // FINISH
+            // ============================================================
             FINISH: begin
                 done_o = 1'b1;
                 if (int_en_i)
@@ -314,45 +311,46 @@ module kvcompressor_core #(
                 if (!start_i)
                     state_d = IDLE;
             end
-
-            default: begin
-                state_d = IDLE;
-            end
         endcase
     end
+
 
     // Sequential state + register update
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
-            state_q           <= IDLE;
-            element_count_q   <= 32'd0;
-            src_offset_q      <= 32'd0;
-            dst_offset_q      <= 32'd0;
+            state_q         <= IDLE;
+            element_count_q <= 0;
+            src_offset_q    <= 0;
+            dst_offset_q    <= 0;
 
-            scale_q           <= 32'd0;
-            zp_q              <= 32'd0;
+            scale_q <= 0;
+            zp_q    <= 0;
 
-            packer_q          <= 32'd0;
-            packer_count_q    <= 2'd0;
+            packer_q       <= 0;
+            packer_count_q <= 0;
 
-            min_q             <= 16'sd0;
-            max_q             <= 16'sd0;
-            auto_scale_pass1_q <= 1'b0;
+            min_q <= 0;
+            max_q <= 0;
+
+            x0 <= 0;
+            x1 <= 0;
         end else begin
-            state_q           <= state_d;
-            element_count_q   <= element_count_d;
-            src_offset_q      <= src_offset_d;
-            dst_offset_q      <= dst_offset_d;
+            state_q         <= state_d;
+            element_count_q <= element_count_d;
+            src_offset_q    <= src_offset_d;
+            dst_offset_q    <= dst_offset_d;
 
-            scale_q           <= scale_d;
-            zp_q              <= zp_d;
+            scale_q <= scale_d;
+            zp_q    <= zp_d;
 
-            min_q             <= min_d;
-            max_q             <= max_d;
-            auto_scale_pass1_q <= auto_scale_pass1_d;
+            min_q <= min_d;
+            max_q <= max_d;
 
-            packer_q          <= packer_d;
-            packer_count_q    <= packer_count_d;
+            packer_q       <= packer_d;
+            packer_count_q <= packer_count_d;
+
+            x0 <= x0; // already updated in combinational
+            x1 <= x1;
         end
     end
 
